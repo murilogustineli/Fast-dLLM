@@ -285,6 +285,7 @@ class Fast_dLLM_QwenForCausalLM:
 
         # Initialize state - show all positions as mask
         initial_state = []
+        current_state = []
 
         if input_ids.shape[1] > block_size:
             output = self.forward(
