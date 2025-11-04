@@ -34,7 +34,9 @@ def extract_accuracy_from_results(results_dir):
         gsm8k_metrics = data.get("results", {}).get("gsm8k", {})
         for key, value in gsm8k_metrics.items():
             if "flexible-extract" in key and key.startswith("exact_match"):
-                print(f"[LOG] Parsed accuracy from {os.path.basename(latest_file)}: {value}")
+                print(
+                    f"[LOG] Parsed accuracy from {os.path.basename(latest_file)}: {value}"
+                )
                 return value
 
         print(f"[WARN] flexible-extract accuracy not found in {latest_file}")
@@ -42,7 +44,6 @@ def extract_accuracy_from_results(results_dir):
     except Exception as e:
         print(f"[WARN] Could not extract accuracy: {e}")
         return None
-
 
 
 def end_run_log(run_info, results_dir=None, **metrics):
@@ -74,11 +75,18 @@ def end_run_log(run_info, results_dir=None, **metrics):
         "accuracy_flexible": accuracy,
     }
 
-    # Include any other custom fields that might exist in metrics
+    # include any other custom fields that might exist in metrics
     extra = {k: v for k, v in metrics.items() if k not in data}
     data.update(extra)
 
-    # Save JSON
+    # merge runtime metrics from the latest runtime_metrics_*.json file
+    runtime_metrics_path = sorted(glob("results/runtime_metrics_*.json"))[-1]
+    if os.path.exists(runtime_metrics_path):
+        with open(runtime_metrics_path) as f:
+            runtime_metrics = json.load(f)
+        data.update(runtime_metrics)
+
+    # save JSON
     with open(run_info["path"], "w") as f:
         json.dump(data, f, indent=2)
 

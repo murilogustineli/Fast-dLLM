@@ -1,9 +1,0 @@
-{
-  "task": "gsm8k",
-  "tag": "threshold1_run",
-  "timestamp": "20251103-051122",
-  "total_time_s": 130.73839163780212,
-  "tokens_generated": null,
-  "tokens_per_s": null,
-  "accuracy_flexible": 0.6
-}

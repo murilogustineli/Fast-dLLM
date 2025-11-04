@@ -379,7 +379,6 @@ class Fast_dLLM_v2EvalHarness(LM):
         #     print(f"Tokens per second: {num_tokens / (end_time - start_time)}")
 
         # return output
-        metrics = {}
         if self.show_speed:
             total_time = end_time - start_time
             tokens_per_s = float(num_tokens) / total_time
@@ -388,11 +387,16 @@ class Fast_dLLM_v2EvalHarness(LM):
                 "total_time_s": total_time,
                 "tokens_per_s": tokens_per_s,
             }
+            # write metrics to file
+            os.makedirs("results", exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            metrics_path = os.path.join("results", f"runtime_metrics_{timestamp}.json")
+            with open(metrics_path, "w") as f:
+                json.dump(metrics, f, indent=2)
+
             print(f"Total number of tokens generated: {num_tokens}")
-            print(f"Total time taken: {total_time} seconds")
-            print(f"Tokens per second: {tokens_per_s}")
-        # store metrics for external access
-        self.last_metrics = metrics
+            print(f"Total time taken: {total_time:.2f} seconds")
+            print(f"Tokens per second: {tokens_per_s:.2f}")
 
         return output
 

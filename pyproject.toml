@@ -1,0 +1,48 @@
+[project]
+name = "fast-dllm"
+version = "0.1.0"
+description = "Fast d-LLM: training-free acceleration of diffusion LLM by enabling KV Cache and Parallel Decoding"
+readme = "README.md"
+requires-python = "==3.12.3"
+authors = [{ name = "Murilo Gustineli" }]
+license = { text = "MIT" }
+
+dependencies = [
+    "packaging",
+    "numpy",
+    "datasets==2.14.6",
+    "tokenizers>=0.13.3",
+    "peft>=0.11.0",
+    "torch>=2.0.1",
+    "wandb",
+    "deepspeed>=0.14.4",
+    "sentencepiece",
+    "transformers>=4.57.1",          # unified to latest working version
+    "cpm_kernels==1.0.11",
+    "evaluate==0.4.0",
+    "bitsandbytes>=0.40.0",
+    "pydantic",
+    "accelerate>=0.33.0",
+    "einops>=0.6.1",
+    "pyarrow==18.0.0",
+    "huggingface_hub>=0.24.0",
+    "hf_transfer",
+    "lm_eval",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "ruff",
+    "pytest",
+]
+
+[project.scripts]
+eval = "eval:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["eval"]
