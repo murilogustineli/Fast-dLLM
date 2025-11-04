@@ -15,27 +15,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # Modified from LLaDA repos: https://github.com/ML-GSAI/LLaDA
 
-'''
+"""
 This file is inspired by the code from https://github.com/ML-GSAI/SMDM
-'''
+"""
+
 import accelerate
 import torch
-import re
+import os, re, io, json, time, types
 from pathlib import Path
 import random
 import numpy as np
 import torch.nn.functional as F
 from datasets import Dataset
+import lm_eval
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.model import LM
-from lm_eval.api.registry import register_model
+from lm_eval.api.registry import register_model, MODEL_REGISTRY
 from tqdm import tqdm
-import os
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-import json
-import time
-import types
 import generation_functions
+from transformers.cache_utils import DynamicCache
+from log_utils import start_run_log, end_run_log
+
+
+# patch DynamicCache globally (HF >=4.42)
+if hasattr(DynamicCache, "__patched_key_cache__") is False:
+
+    def _ensure_key_value_cache(self):
+        if not hasattr(self, "key_cache"):
+            try:
+                self.key_cache = [layer.key for layer in self]
+                self.value_cache = [layer.value for layer in self]
+            except Exception:
+                # fallback to empty to prevent crashes
+                self.key_cache, self.value_cache = [], []
+
+    def _patched_update(self, *args, **kwargs):
+        out = self._orig_update(*args, **kwargs)
+        self._ensure_key_value_cache()
+        return out
+
+    DynamicCache._orig_update = getattr(DynamicCache, "update", lambda *a, **k: None)
+    DynamicCache.update = _patched_update
+    DynamicCache._ensure_key_value_cache = _ensure_key_value_cache
+    DynamicCache.__patched_key_cache__ = True
+
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -50,7 +74,7 @@ def set_seed(seed):
 class Fast_dLLM_v2EvalHarness(LM):
     def __init__(
         self,
-        model_path='Efficient-Large-Model/Fast_dLLM_v2_7B',
+        model_path="Efficient-Large-Model/Fast_dLLM_v2_7B",
         device="cuda",
         show_speed=False,
         max_new_tokens=2048,
@@ -62,7 +86,6 @@ class Fast_dLLM_v2EvalHarness(LM):
         threshold=0.9,
         **kwargs,
     ):
-
         super().__init__()
 
         accelerator = accelerate.Accelerator()
@@ -70,34 +93,38 @@ class Fast_dLLM_v2EvalHarness(LM):
             self.accelerator = accelerator
         else:
             self.accelerator = None
-        
+
         model_kwargs = {}
         if self.accelerator is not None:
-            model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
-        
+            model_kwargs.update({"device_map": {"": f"{self.accelerator.device}"}})
+
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_path, 
-            trust_remote_code=True, 
-            torch_dtype=torch.bfloat16, 
-            **model_kwargs
+            model_path,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+            **model_kwargs,
         )
         self.model.eval()
 
-        self.model.mdm_sample = types.MethodType(generation_functions.Fast_dLLM_QwenForCausalLM.batch_sample, self.model)
+        self.model.mdm_sample = types.MethodType(
+            generation_functions.Fast_dLLM_QwenForCausalLM.batch_sample, self.model
+        )
 
         self.device = torch.device(device)
         if self.accelerator is not None:
             self.model = self.accelerator.prepare(self.model)
-            self.device = torch.device(f'{self.accelerator.device}')
+            self.device = torch.device(f"{self.accelerator.device}")
             self._rank = self.accelerator.local_process_index
             self._world_size = self.accelerator.num_processes
-        else: 
+        else:
             self.model = self.model.to(device)
             self._rank = 0
             self._world_size = 1
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True
+        )
+
         self.show_speed = show_speed
         self.max_new_tokens = max_new_tokens
         self.batch_size = int(batch_size)
@@ -111,7 +138,7 @@ class Fast_dLLM_v2EvalHarness(LM):
     @property
     def rank(self):
         return self._rank
-    
+
     @property
     def world_size(self):
         return self._world_size
@@ -119,13 +146,15 @@ class Fast_dLLM_v2EvalHarness(LM):
     @property
     def tokenizer_name(self):
         return self.model_path
-    
+
     def apply_chat_template(self, chat_history, add_generation_prompt=True):
-        return self.tokenizer.apply_chat_template(chat_history, add_generation_prompt=add_generation_prompt, tokenize=False)
-    
+        return self.tokenizer.apply_chat_template(
+            chat_history, add_generation_prompt=add_generation_prompt, tokenize=False
+        )
+
     def loglikelihood_rolling(self, requests):
         raise NotImplementedError
-    
+
     def _encode_pair(self, context, continuation):
         whole_enc = self.tokenizer(context + continuation)["input_ids"]
         context_enc = self.tokenizer(context)["input_ids"]
@@ -135,13 +164,23 @@ class Fast_dLLM_v2EvalHarness(LM):
 
         return context_enc, continuation_enc
 
-
     def _forward_process(self, batch, prompt_index):
         b, l = batch.shape
 
         batch[:, prompt_index.sum()] = self.mask_id
 
-        batch = torch.cat([batch.to(self.device), torch.full((b, self.bd_size-batch.shape[1]%self.bd_size), self.mask_id, dtype=torch.long, device=self.device)], dim=1)
+        batch = torch.cat(
+            [
+                batch.to(self.device),
+                torch.full(
+                    (b, self.bd_size - batch.shape[1] % self.bd_size),
+                    self.mask_id,
+                    dtype=torch.long,
+                    device=self.device,
+                ),
+            ],
+            dim=1,
+        )
         if batch.shape[1] > l:
             batch[:, l] = self.tokenizer.eos_token_id
 
@@ -151,7 +190,7 @@ class Fast_dLLM_v2EvalHarness(LM):
     def get_logits(self, batch):
         logits = self.model(batch).logits
         logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
-        return logits[:, :batch.shape[1]]
+        return logits[:, : batch.shape[1]]
 
     @torch.no_grad()
     def get_loglikelihood(self, prefix, target):
@@ -166,13 +205,25 @@ class Fast_dLLM_v2EvalHarness(LM):
         mask_indices = perturbed_seq == self.mask_id
 
         logits = self.get_logits(perturbed_seq)
-        seq = torch.cat([seq.to(self.device), torch.full((seq.shape[0], self.bd_size-seq.shape[1]%self.bd_size), -100, dtype=torch.long, device=self.device)], dim=1)
-        loss = F.cross_entropy(logits[mask_indices], seq[mask_indices], reduction='none')
+        seq = torch.cat(
+            [
+                seq.to(self.device),
+                torch.full(
+                    (seq.shape[0], self.bd_size - seq.shape[1] % self.bd_size),
+                    -100,
+                    dtype=torch.long,
+                    device=self.device,
+                ),
+            ],
+            dim=1,
+        )
+        loss = F.cross_entropy(
+            logits[mask_indices], seq[mask_indices], reduction="none"
+        )
         loss = loss.sum()
         loss_acc.append(loss.item())
 
-        return - sum(loss_acc) / len(loss_acc)
-
+        return -sum(loss_acc) / len(loss_acc)
 
     def loglikelihood(self, requests):
         def _tokenize(e):
@@ -203,16 +254,16 @@ class Fast_dLLM_v2EvalHarness(LM):
                 out.append((ll, 0.0))
         torch.cuda.empty_cache()
         return out
-    
+
     def generate_until(self, requests):
         output = [None] * len(requests)  # pre-allocate output list
         num_tokens = 0
-        
+
         start_time = time.time()
-        
+
         requests_with_indices = [(i, req) for i, req in enumerate(requests)]
         requests_with_indices.sort(key=lambda x: len(x[1].args[0]))
-        
+
         batched_requests = []
         current_batch = []
         for i, req in requests_with_indices:
@@ -220,7 +271,7 @@ class Fast_dLLM_v2EvalHarness(LM):
             if len(current_batch) == self.batch_size:
                 batched_requests.append(current_batch)
                 current_batch = []
-        
+
         if current_batch:
             batched_requests.append(current_batch)
 
@@ -229,28 +280,52 @@ class Fast_dLLM_v2EvalHarness(LM):
             max_len = 0
             min_len = 1e9
             seq_len = []
-            
+
             for orig_idx, req in batch:
                 question = req.args[0]
-                
-                if req.task_name.startswith('minerva_math'):
-                    question = question.replace("Solution:", "Please reason step by step, and put your final answer within \\boxed{{}}.")
-                elif req.task_name.startswith('gsm8k'):
-                    question = question.replace("Answer:", "Please reason step by step, and put your final answer within \\boxed{{}}.")
-                model_inputs = self.tokenizer([question], return_tensors="pt").to(self.device)
+
+                if req.task_name.startswith("minerva_math"):
+                    question = question.replace(
+                        "Solution:",
+                        "Please reason step by step, and put your final answer within \\boxed{{}}.",
+                    )
+                elif req.task_name.startswith("gsm8k"):
+                    question = question.replace(
+                        "Answer:",
+                        "Please reason step by step, and put your final answer within \\boxed{{}}.",
+                    )
+                model_inputs = self.tokenizer([question], return_tensors="pt").to(
+                    self.device
+                )
                 batched_input_ids.append(model_inputs["input_ids"])
                 max_len = max(max_len, model_inputs["input_ids"].shape[1])
                 min_len = min(min_len, model_inputs["input_ids"].shape[1])
                 seq_len.append(model_inputs["input_ids"].shape[1])
-            
+
             # pad batched_input_ids to the same length
-            batched_input_ids = [torch.cat([input_ids, torch.full((1, max_len - input_ids.shape[1]), self.mask_id, dtype=torch.long, device=self.device)], dim=1) for input_ids in batched_input_ids]
+            batched_input_ids = [
+                torch.cat(
+                    [
+                        input_ids,
+                        torch.full(
+                            (1, max_len - input_ids.shape[1]),
+                            self.mask_id,
+                            dtype=torch.long,
+                            device=self.device,
+                        ),
+                    ],
+                    dim=1,
+                )
+                for input_ids in batched_input_ids
+            ]
             batched_input_ids = torch.cat(batched_input_ids, dim=0)
             batched_input_ids = batched_input_ids.to(self.device)
-            
+
             with torch.no_grad():
                 if self.accelerator is not None:
-                    generated_ids = self.accelerator.unwrap_model(self.model).mdm_sample(
+                    generated_ids = self.accelerator.unwrap_model(
+                        self.model
+                    ).mdm_sample(
                         batched_input_ids,
                         tokenizer=self.tokenizer,
                         block_size=self.bd_size,
@@ -275,35 +350,80 @@ class Fast_dLLM_v2EvalHarness(LM):
                         use_block_cache=self.use_block_cache,
                         threshold=self.threshold,
                     )
-            
+
             # extract new generated tokens, and keep original index order
             for batch_pos, (orig_idx, req) in enumerate(batch):
                 generated_answer = self.tokenizer.decode(
-                    generated_ids[batch_pos][seq_len[batch_pos]:], 
-                    skip_special_tokens=True
+                    generated_ids[batch_pos][seq_len[batch_pos] :],
+                    skip_special_tokens=True,
                 )
-            
+
                 # count token number
                 if self.show_speed:
-                    num_tokens += (generated_ids[batch_pos][seq_len[batch_pos]:] != self.mask_id).sum()
-                
+                    num_tokens += (
+                        generated_ids[batch_pos][seq_len[batch_pos] :] != self.mask_id
+                    ).sum()
+
                 # put result in the correct original index position
                 output[orig_idx] = generated_answer
 
-                print('=' * 20)
-                print('question: ', req.args[0])
-                print('answer: ', generated_answer)
-                print('=' * 20, end='\n\n')
-            
+                print("=" * 20)
+                print("question: ", req.args[0])
+                print("answer: ", generated_answer)
+                print("=" * 20, end="\n\n")
+
         end_time = time.time()
+        # if self.show_speed:
+        #     print(f"Total number of tokens generated: {num_tokens}")
+        #     print(f"Total time taken: {end_time - start_time} seconds")
+        #     print(f"Tokens per second: {num_tokens / (end_time - start_time)}")
+
+        # return output
         if self.show_speed:
+            total_time = end_time - start_time
+            tokens_per_s = float(num_tokens) / total_time
+            metrics = {
+                "tokens_generated": int(num_tokens),
+                "total_time_s": total_time,
+                "tokens_per_s": tokens_per_s,
+            }
+            # write metrics to file
+            os.makedirs("results", exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            metrics_path = os.path.join("results", f"runtime_metrics_{timestamp}.json")
+            with open(metrics_path, "w") as f:
+                json.dump(metrics, f, indent=2)
+
             print(f"Total number of tokens generated: {num_tokens}")
-            print(f"Total time taken: {end_time - start_time} seconds")
-            print(f"Tokens per second: {num_tokens / (end_time - start_time)}")
-            
+            print(f"Total time taken: {total_time:.2f} seconds")
+            print(f"Tokens per second: {tokens_per_s:.2f}")
+
         return output
 
 
 if __name__ == "__main__":
+    # get task/tag dynamically if passed from bash
+    task = os.environ.get("TASK_NAME", "gsm8k")
+    tag = os.environ.get("RUN_TAG", None)
+
+    # output_dir is always where lm-eval saves results
+    results_dir = os.path.join("results", f"{task}_{tag}_raw")
+
+    # start timer/log
+    run_info = start_run_log(task=task, tag=tag)
+
+    # run the evaluation
     cli_evaluate()
-    
+
+    # retrieve the most recent model instance created by lm_eval
+    model_instance = None
+    for model_name, model_cls in MODEL_REGISTRY.items():
+        if model_name == "fast_dllm_v2" and hasattr(model_cls, "last_metrics"):
+            model_instance = model_cls
+            break
+
+    # retrieve metrics directly from the model class
+    metrics = getattr(model_instance, "last_metrics", {}) if model_instance else {}
+    data = end_run_log(run_info, results_dir=results_dir, **metrics)
+    with open(run_info["path"], "w") as f:
+        json.dump(data, f, indent=2)
