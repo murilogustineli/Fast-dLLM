@@ -12,6 +12,13 @@ if [ "$1" == "--limit" ] && [ -n "$2" ]; then
     echo "[INFO] Limiting evaluation to $2 samples"
 fi
 
+# parse optional --batch_size argument
+BATCH_SIZE=1
+if [ "$3" == "--batch_size" ] && [ -n "$4" ]; then
+    BATCH_SIZE=$4
+    echo "[INFO] Setting batch size to $BATCH_SIZE"
+fi
+
 # environment setup
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true

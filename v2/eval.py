@@ -84,9 +84,15 @@ class Fast_dLLM_v2EvalHarness(LM):
         small_block_size=8,
         bd_size=32,
         threshold=0.9,
+        reuse_k=1,
+        layer_subset=None,
         **kwargs,
     ):
         super().__init__()
+
+        # reuse activations parameters
+        self.reuse_k = reuse_k
+        self.layer_subset = layer_subset
 
         accelerator = accelerate.Accelerator()
         if accelerator.num_processes > 1:
@@ -349,6 +355,8 @@ class Fast_dLLM_v2EvalHarness(LM):
                         seq_len=torch.tensor(seq_len, device=self.device),
                         use_block_cache=self.use_block_cache,
                         threshold=self.threshold,
+                        reuse_k=self.reuse_k,
+                        layer_subset=self.layer_subset,
                     )
 
             # extract new generated tokens, and keep original index order
