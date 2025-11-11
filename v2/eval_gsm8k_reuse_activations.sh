@@ -28,31 +28,37 @@ TASK="gsm8k"
 mkdir -p results
 
 # sweep over k = 1, 2, 3
-for K in 1 2 3; do
-    TAG="reuse_k${K}_limit${NUM_SAMPLES}"
+for subset in first middle last; do
+    for K in 1 2 3; do
+        TAG="reuse_${subset}_k${K}_limit${NUM_SAMPLES}"
 
-    # pass variables to eval.py for logging
-    export TASK_NAME=$TASK
-    export RUN_TAG=$TAG
+        # pass variables to eval.py for logging
+        export TASK_NAME=$TASK
+        export RUN_TAG=$TAG
 
-    echo ""
-    echo "================================================================"
-    echo "[INFO] Starting evaluation: $TASK  |  reuse_k=${K}  |  ${NUM_SAMPLES} samples"
-    echo "================================================================"
+        # deterministic results across subsets
+        export CUBLAS_WORKSPACE_CONFIG=":16:8"
+        export PYTHONHASHSEED=42
 
-    accelerate launch eval.py \
-        --tasks ${TASK} \
+        echo ""
+        echo "============================================================================="
+        echo "[INFO] Starting evaluation: $TASK | subset=${subset} | reuse_k=${K} | samples=${NUM_SAMPLES}"
+        echo "============================================================================="
+
+        accelerate launch eval.py \
+        --tasks gsm8k \
+        --model fast_dllm_v2 \
         --batch_size 1 \
         --num_fewshot 0 \
-        ${LIMIT_ARG} \
         --confirm_run_unsafe_code \
-        --model fast_dllm_v2 \
-        --fewshot_as_multiturn \
         --apply_chat_template \
-        --model_args model_path=${MODEL_PATH},threshold=1,show_speed=True,use_block_cache=True,reuse_k=${K} \
-        --output_path results/${TASK}_${TAG}_raw/
+        --model_args "model_path=${MODEL_PATH},reuse_k=${K},layer_subset=${subset},use_block_cache=True,show_speed=True" \
+        ${LIMIT_ARG} \
+        --output_path results/gsm8k_${TAG}_raw/
 
-    echo "[INFO] Evaluation complete for reuse_k=${K}"
+
+        echo "[INFO] Evaluation complete for reuse_k=${K}"
+    done
 done
 
 echo ""
