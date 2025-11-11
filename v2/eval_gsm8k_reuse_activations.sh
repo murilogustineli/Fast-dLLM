@@ -27,6 +27,9 @@ TASK="gsm8k"
 # create results directory if not exists
 mkdir -p results
 
+# datetime for saving results
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
 # sweep over k = 1, 2, 3
 for subset in first middle last; do
     for K in 1 2 3; do
@@ -54,7 +57,7 @@ for subset in first middle last; do
         --apply_chat_template \
         --model_args "model_path=${MODEL_PATH},reuse_k=${K},layer_subset=${subset},use_block_cache=True,show_speed=True" \
         ${LIMIT_ARG} \
-        --output_path results/gsm8k_${TAG}_raw/
+        --output_path results/${TIMESTAMP}/gsm8k_${TAG}_raw/
 
 
         echo "[INFO] Evaluation complete for reuse_k=${K}"

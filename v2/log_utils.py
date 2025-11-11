@@ -1,6 +1,8 @@
-import json
 import os
 import time
+import json
+import torch
+import subprocess
 from glob import glob
 
 
@@ -17,6 +19,39 @@ def start_run_log(task="gsm8k", tag=None, log_dir="results"):
         "tag": tag,
         "timestamp": timestamp,
     }
+
+
+def get_gpu_info():
+    """Return a dict with GPU specs (name, memory, driver, CUDA)."""
+    info = {"gpu_available": torch.cuda.is_available()}
+    if not info["gpu_available"]:
+        return info
+
+    try:
+        device_idx = 0
+        props = torch.cuda.get_device_properties(device_idx)
+        info.update({
+            "gpu_name": props.name,
+            "gpu_total_vram_gb": round(props.total_memory / (1024**3), 2),
+            "cuda_device": device_idx,
+            "cuda_version": torch.version.cuda,
+            "driver_version": None,
+        })
+
+        # get driver version via nvidia-smi (fallback to torch if missing)
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                stderr=subprocess.DEVNULL
+            ).decode().strip().split("\n")[device_idx]
+            info["driver_version"] = out
+        except Exception:
+            pass
+
+        return info
+    except Exception as e:
+        info["error"] = str(e)
+        return info
 
 
 def extract_accuracy_from_results(results_dir):
@@ -80,11 +115,15 @@ def end_run_log(run_info, results_dir=None, **metrics):
     data.update(extra)
 
     # merge runtime metrics from the latest runtime_metrics_*.json file
-    runtime_metrics_path = sorted(glob("results/runtime_metrics_*.json"))[-1]
-    if os.path.exists(runtime_metrics_path):
+    runtime_metrics_files = sorted(glob(os.path.join(os.path.dirname(run_info["path"]), "runtime_metrics_*.json")))
+    if runtime_metrics_files:
+        runtime_metrics_path = runtime_metrics_files[-1]
         with open(runtime_metrics_path) as f:
             runtime_metrics = json.load(f)
         data.update(runtime_metrics)
+
+    # add GPU info
+    data["gpu_info"] = get_gpu_info()
 
     # save JSON
     with open(run_info["path"], "w") as f:

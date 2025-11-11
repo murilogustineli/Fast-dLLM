@@ -22,18 +22,19 @@ This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 import accelerate
 import torch
 import os, re, io, json, time, types
-from pathlib import Path
 import random
 import numpy as np
 import torch.nn.functional as F
-from datasets import Dataset
+import generation_functions
 import lm_eval
+from pathlib import Path
+from datasets import Dataset
+from datetime import datetime
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model, MODEL_REGISTRY
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-import generation_functions
 from transformers.cache_utils import DynamicCache
 from log_utils import start_run_log, end_run_log
 
@@ -381,10 +382,6 @@ class Fast_dLLM_v2EvalHarness(LM):
                 print("=" * 20, end="\n\n")
 
         end_time = time.time()
-        # if self.show_speed:
-        #     print(f"Total number of tokens generated: {num_tokens}")
-        #     print(f"Total time taken: {end_time - start_time} seconds")
-        #     print(f"Tokens per second: {num_tokens / (end_time - start_time)}")
 
         # return output
         if self.show_speed:
@@ -396,9 +393,17 @@ class Fast_dLLM_v2EvalHarness(LM):
                 "tokens_per_s": tokens_per_s,
             }
             # write metrics to file
-            os.makedirs("results", exist_ok=True)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            metrics_path = os.path.join("results", f"runtime_metrics_{timestamp}.json")
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+            # infer directory of the current run summary (safe fallback to results/)
+            base_dir = "results"
+            if hasattr(self, "run_info") and "path" in getattr(self, "run_info", {}):
+                base_dir = os.path.dirname(self.run_info["path"])
+            elif os.environ.get("RUN_TIMESTAMP"):
+                base_dir = os.path.join("results", os.environ["RUN_TIMESTAMP"])
+            os.makedirs(base_dir, exist_ok=True)
+            # write runtime metrics inside timestamp folder
+            metrics_path = os.path.join(base_dir, f"runtime_metrics_{timestamp}.json")
             with open(metrics_path, "w") as f:
                 json.dump(metrics, f, indent=2)
 
@@ -413,12 +418,17 @@ if __name__ == "__main__":
     # get task/tag dynamically if passed from bash
     task = os.environ.get("TASK_NAME", "gsm8k")
     tag = os.environ.get("RUN_TAG", None)
+    timestamp = os.environ.get("RUN_TIMESTAMP", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-    # output_dir is always where lm-eval saves results
-    results_dir = os.path.join("results", f"{task}_{tag}_raw")
+    # create timestamp folder
+    base_dir = os.path.join("results", timestamp)
+    os.makedirs(base_dir, exist_ok=True)
+
+    # output dir for lm-eval results (raw predictions, etc.)
+    results_dir = os.path.join(base_dir, f"{task}_{tag}_raw")
 
     # start timer/log
-    run_info = start_run_log(task=task, tag=tag)
+    run_info = start_run_log(task=task, tag=tag, log_dir=base_dir)
 
     # run the evaluation
     cli_evaluate()
