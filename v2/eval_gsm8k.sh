@@ -12,6 +12,13 @@ if [ "$1" == "--limit" ] && [ -n "$2" ]; then
     echo "[INFO] Limiting evaluation to $2 samples"
 fi
 
+# parse optional --batch_size argument
+BATCH_SIZE=1
+if [ "$3" == "--batch_size" ] && [ -n "$4" ]; then
+    BATCH_SIZE=$4
+    echo "[INFO] Setting batch size to $BATCH_SIZE"
+fi
+
 # environment setup
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
@@ -21,12 +28,16 @@ MODEL_PATH="Efficient-Large-Model/Fast_dLLM_v2_7B"
 TASK="gsm8k"
 TAG="threshold1_run"
 
+# datetime for saving results
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
 # pass variables to eval.py for logging
 export TASK_NAME=$TASK
 export RUN_TAG=$TAG
+export RUN_TIMESTAMP=$TIMESTAMP
 
 # create results directory if not exists
-mkdir -p results
+mkdir -p results/${TIMESTAMP}
 
 # run evaluation
 echo "[INFO] Starting evaluation: $TASK (${MODEL_PATH})"
@@ -40,6 +51,6 @@ ${LIMIT_ARG} \
 --fewshot_as_multiturn \
 --apply_chat_template \
 --model_args model_path=${MODEL_PATH},threshold=1,show_speed=True \
---output_path results/${TASK}_${TAG}_raw/
+--output_path results/${TIMESTAMP}/${TASK}_${TAG}_raw/
 
 echo "[INFO] Evaluation complete."

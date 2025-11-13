@@ -7,3 +7,8 @@ llada/evals_results/
 dream/evals_results/
 .DS_Store
 **/.DS_Store
+results/
+.venv/
+.venv
+venv/
+env/
