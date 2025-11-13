@@ -15,11 +15,6 @@ def auto_docstring(x):
     return x
 
 
-def gdbg(*a, **k):
-    if os.environ.get("DEBUG_LAYER_REUSE", "0") == "1":
-        print("[GEN-FUNC-DEBUG]", *a, **k)
-
-
 @auto_docstring
 class Fast_dLLM_QwenForCausalLM:
     @torch.no_grad()
@@ -48,15 +43,12 @@ class Fast_dLLM_QwenForCausalLM:
         # (patch subset of layers to reuse activations every k steps)
         controller = None
         if layer_subset is not None:
-            gdbg(f"Controller init: subset={layer_subset} reuse_k={reuse_k}")
             controller = LayerReuseController(
                 self.model, subset=layer_subset, reuse_k=reuse_k
             )
             controller.enable_reuse()
-            gdbg("Controller enabled")
 
         if min_len > block_size:
-            gdbg("Top-level forward() call: full-block recompute (not block-cache)")
             output = self.forward(
                 input_ids=input_ids[:, : (min_len // block_size * block_size)],
                 use_cache=True,
@@ -132,7 +124,6 @@ class Fast_dLLM_QwenForCausalLM:
                     step += 1
                     if controller is not None:
                         controller.step()
-                        gdbg("controller.step() called")
                     break
 
                 for small_block_idx in range(num_small_blocks):
