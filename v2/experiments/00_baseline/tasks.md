@@ -98,7 +98,7 @@ When reuse spans across different small blocks, wrong-position hidden states are
 > Full analysis, step-by-step trace, and fix design in
 > [debugging.md](debugging.md#phase-6-investigation-resolved--mar-7-2026).
 
-## Phase 7: Two-Tier Caching Fix [DONE]
+## Phase 7: Two-Tier Caching Fix [DONE — INVALIDATED BY BUG 8]
 
 Fix Bug 6 by replacing the single-slot `layer_cache["last_output"]` with a dedicated
 `layer_cache["full_block_output"]` that small-block recomputes cannot overwrite.
@@ -110,34 +110,32 @@ Fix Bug 6 by replacing the single-slot `layer_cache["last_output"]` with a dedic
 
 > Fix design in [debugging.md](debugging.md#fix-two-tier-caching).
 
-### Validation Results: GSM8K limit_10 (Mar 7, Post-Fix)
+> **INVALIDATED**: All limit_10 and limit_100 results from Phase 7 are invalid.
+> Bug 8 (cache never populated) meant layer reuse had zero effect — all configs
+> produced identical output. See Phase 9.
 
-All 9 configs produce 70% accuracy — middle/last collapse fully resolved.
+## Phase 8: Scaled Validation [DONE — INVALID]
 
-| Config | Accuracy | Notes |
-|--------|----------|-------|
-| k1_first | 70% | No reuse (k=1) |
-| k1_middle | 70% | No reuse (k=1) |
-| k1_last | 70% | No reuse (k=1) |
-| k2_first | 70% | OK |
-| k2_middle | 70% | RECOVERED (was 10%) |
-| k2_last | 70% | RECOVERED (was 10%) |
-| k3_first | 70% | OK |
-| k3_middle | 70% | RECOVERED (was 0%) |
-| k3_last | 70% | RECOVERED (was 0%) |
+Limit_100 sbatch runs completed but all 9 configs produced identical results
+(80% accuracy, 31941 tokens, ~45 tok/s). Investigation revealed Bug 8: the cache
+condition `tensor.shape[1] > current_input.shape[1]` was always False at the
+layer level, so `full_block_output` was never stored and every "reuse" call
+fell through to `original_forward()`.
 
-> Note: All configs showing identical accuracy on limit_10 is expected — 10 samples
-> is too few to differentiate. Full runs needed to see accuracy vs throughput tradeoff.
+- [x] Run all 9 configs on GSM8K `--limit 100` via sbatch (Mar 7)
+- [x] Discover identical results → investigate → find Bug 8
+- [x] Fix Bug 8: replace shape comparison with `step == 0`
+- [x] Confirm fix: k1_first (538 tok, 34.3 tok/s, 100%) vs k3_middle (2267 tok, 58.4 tok/s, 50%)
 
-## Phase 8: Scaled Validation & Full Runs [IN PROGRESS]
+> All limit_100 results invalid. See [debugging.md](debugging.md#bug-8-critical-fixed---mar-7-full_block_output-cache-never-populated).
 
-Limit_10 confirmed the fix works but all configs show identical accuracy (10 samples
-too few to differentiate). Running limit_100 via sbatch to get meaningful signal before
-committing to full runs.
+## Phase 9: Re-validation with Bug 8 Fix [TODO]
 
-- [~] Run all 9 configs on GSM8K `--limit 100` via sbatch (submitted Mar 7)
-- [ ] Analyze limit_100 results — confirm accuracy differentiation across k and subset
-- [ ] Run full GSM8K (all 9 configs, 1319 samples)
-- [ ] Run full Minerva Math (all 9 configs)
-- [ ] Run full IFEval (all 9 configs)
+Bug 8 fix confirmed working on limit_2. Need to clean up debug prints and re-run.
+
+- [ ] Remove debug prints from `generation_functions.py`
+- [ ] Run all 9 configs on GSM8K `--limit 10` — verify differentiation across configs
+- [ ] Run all 9 configs on GSM8K `--limit 100` via sbatch
+- [ ] If results look correct, run full GSM8K (all 9 configs, 1319 samples)
+- [ ] Run full Minerva Math and IFEval
 - [ ] Update results.md with final numbers

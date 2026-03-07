@@ -20,11 +20,13 @@ def _patch_layers_helper(model, reuse_k, subset_name, reuse_state):
     that caches outputs and skips computation based on reuse_state.
     """
     if not subset_name or reuse_k <= 1:
+        print(f"[DEBUG] _patch_layers_helper: SKIPPING (subset_name={subset_name!r}, reuse_k={reuse_k!r}, type={type(reuse_k).__name__})")
         return {}
 
     # 1. Identify Target Layers
     layers = model.layers
     n = len(layers)
+    print(f"[DEBUG] _patch_layers_helper: PATCHING {subset_name} with k={reuse_k}, model has {n} layers")
     subset_size = 12
     target_indices = []
 
@@ -48,9 +50,12 @@ def _patch_layers_helper(model, reuse_k, subset_name, reuse_state):
         layer_cache = {}
         reuse_state["caches"][layer_idx] = layer_cache
 
+        _stats = [0, 0, 0, 0, 0]  # [recompute, reuse_hit, disabled, cache_stored, reuse_fallback]
+
         def wrapper(self_layer, *args, **kwargs):
             # If reuse is globally disabled, run normal
             if not reuse_state["enabled"]:
+                _stats[2] += 1
                 return original_forward(*args, **kwargs)
 
             step = reuse_state["count"]
@@ -64,21 +69,28 @@ def _patch_layers_helper(model, reuse_k, subset_name, reuse_state):
                 should_recompute = True
 
             if should_recompute:
+                _stats[0] += 1
                 output = original_forward(*args, **kwargs)
                 tensor = output[0] if isinstance(output, tuple) else output
                 current_input = args[0]
 
                 # Only update the reuse cache during full-block forwards.
-                # Full-block forwards produce output with more tokens than the
-                # small-block input (32 > 8). Small-block recomputes must NOT
-                # overwrite the full-block cache — that causes cross-small-block
-                # contamination (Bug 6).
-                if tensor.shape[1] > current_input.shape[1]:
+                # The generation loop forces count=0 exclusively for full-block
+                # forwards (which process all 32 tokens). Small-block recomputes
+                # (count=k, 2k, 3k...) must NOT overwrite the full-block cache —
+                # that causes cross-small-block contamination (Bug 6).
+                #
+                # NOTE: The old condition `tensor.shape[1] > current_input.shape[1]`
+                # was ALWAYS False because decoder layers output the same seq_len
+                # as their input. This meant the cache was never populated (Bug 8).
+                if step == 0:
                     layer_cache["full_block_output"] = tensor
                     layer_cache["is_tuple"] = isinstance(output, tuple)
+                    _stats[3] += 1  # cache_stored
 
                 return output
             else:
+                _stats[1] += 1
                 # Reuse: always slice from the full-block cache (32 tokens).
                 # This avoids cross-small-block contamination — the 32-token
                 # cache covers all positions, and replace_position selects
@@ -101,8 +113,11 @@ def _patch_layers_helper(model, reuse_k, subset_name, reuse_state):
                     else:
                         return output_tensor
                 else:
+                    _stats[4] += 1  # reuse_fallback (cache empty!)
                     return original_forward(*args, **kwargs)
 
+        wrapper._stats = _stats  # expose for summary
+        wrapper._layer_idx = layer_idx
         return wrapper
 
     # 3. Apply the Monkey Patch
@@ -112,12 +127,19 @@ def _patch_layers_helper(model, reuse_k, subset_name, reuse_state):
             create_wrapper(layers[idx].forward, idx), layers[idx]
         )
 
+    print(f"[DEBUG] Patched {len(target_indices)} layers: {target_indices}")
     return original_forwards
 
 
 def _unpatch_layers_helper(model, original_forwards):
     """Restores the original .forward() methods."""
     layers = model.layers
+    # Print wrapper stats before unpatching
+    for idx in sorted(original_forwards.keys()):
+        wrapper = layers[idx].forward
+        if hasattr(wrapper, '_stats'):
+            s = wrapper._stats
+            print(f"[DEBUG] Layer {idx} stats: recompute={s[0]}, reuse_hit={s[1]}, disabled={s[2]}, cache_stored={s[3]}, reuse_fallback={s[4]}")
     for idx, orig_func in original_forwards.items():
         layers[idx].forward = orig_func
 

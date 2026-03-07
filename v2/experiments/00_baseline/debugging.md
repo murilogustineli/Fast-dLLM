@@ -123,6 +123,46 @@ showed 70%.
 Since lm_eval uses ISO timestamps in filenames (`results_2026-03-07T16-16-31.json`),
 this returns the latest file.
 
+### Bug 8 (CRITICAL) [FIXED - Mar 7]: `full_block_output` cache never populated
+
+**File**: `experiments/00_baseline/generation_functions.py`, wrapper recompute path
+**Impact**: Layer reuse has ZERO effect — every "reuse" call runs `original_forward()`
+
+The two-tier caching fix (Bug 6) used this condition to detect full-block forwards:
+
+```python
+if tensor.shape[1] > current_input.shape[1]:  # ALWAYS False!
+    layer_cache["full_block_output"] = tensor
+```
+
+A decoder layer's output ALWAYS has the same sequence length as its input
+(`[B, seq_len, D]` → `[B, seq_len, D]`). This condition was designed for the
+model-level forward (where 32 input tokens → 32 output tokens), but it was placed
+inside the LAYER wrapper where input and output shapes match. Result: `full_block_output`
+was never stored, every reuse call fell through to `original_forward()`, and layer
+reuse had literally zero effect on generation.
+
+**Evidence** (debug stats per layer for k=3, 1 sample):
+- Before fix: `cache_stored=0, reuse_fallback=43` (all reuse calls run full forward)
+- After fix: `cache_stored=270, reuse_hit=108, reuse_fallback=0` (actual cache hits)
+
+**Fix**: Replace shape comparison with `step == 0`. The generation loop forces
+`reuse_state["count"] = 0` exclusively during full-block forwards. Small-block
+recomputes have `count = k, 2k, 3k...` (never 0). So `step == 0` reliably identifies
+full-block forwards at the layer level.
+
+```python
+# OLD (Bug 8 — always False):
+if tensor.shape[1] > current_input.shape[1]:
+
+# NEW (correctly identifies full-block forwards):
+if step == 0:
+```
+
+**Confirmed working**: k1_first (538 tokens, 34.3 tok/s, 100% acc) vs k3_middle
+(2267 tokens, 58.4 tok/s, 50% acc) on limit_2 — different outputs, higher throughput,
+lower accuracy. Layer reuse is now actually active.
+
 ---
 
 ## Design Constraint: Block Cache vs Layer Reuse
