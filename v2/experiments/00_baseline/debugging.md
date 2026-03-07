@@ -108,6 +108,21 @@ cache fresh 32-token outputs.
 **What this did NOT fix**: Accuracy for middle/last still 0-10% — but the failure mode
 changed from gibberish to coherent-but-wrong answers.
 
+### Bug 7 (MINOR) [FIXED - Mar 7]: `find_results_file()` picks arbitrary results file
+
+**File**: `v2/log_utils.py:95-111`
+**Impact**: `summary.json` reports stale accuracy from old runs instead of latest run
+
+`os.listdir()` returns entries in arbitrary order. When multiple `results_*.json` files
+exist (from re-runs with `--force`), the function picked whichever file came first —
+often a stale result from a previous buggy run. This made it appear that the Bug 6 fix
+hadn't worked (summary.json showed 0-10% accuracy) when the actual latest results all
+showed 70%.
+
+**Fix**: Collect all `results_*.json` candidates and sort reverse-lexicographically.
+Since lm_eval uses ISO timestamps in filenames (`results_2026-03-07T16-16-31.json`),
+this returns the latest file.
+
 ---
 
 ## Design Constraint: Block Cache vs Layer Reuse

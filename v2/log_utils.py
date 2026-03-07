@@ -100,13 +100,19 @@ def find_results_file(results_dir):
         return direct_path
 
     # lm_eval writes to <model_name_sanitized>/results_<timestamp>.json
-    # Look for any subdirectory containing results_*.json
+    # Collect all matching files and return the latest (by filename sort,
+    # since lm_eval uses ISO timestamps like results_2026-02-16T12:34:56.json)
+    candidates = []
     for item in os.listdir(results_dir):
         subdir = os.path.join(results_dir, item)
         if os.path.isdir(subdir):
             for filename in os.listdir(subdir):
                 if filename.startswith("results_") and filename.endswith(".json"):
-                    return os.path.join(subdir, filename)
+                    candidates.append(os.path.join(subdir, filename))
+
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0]
 
     return None
 

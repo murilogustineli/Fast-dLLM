@@ -98,15 +98,35 @@ When reuse spans across different small blocks, wrong-position hidden states are
 > Full analysis, step-by-step trace, and fix design in
 > [debugging.md](debugging.md#phase-6-investigation-resolved--mar-7-2026).
 
-## Phase 7: Two-Tier Caching Fix [TODO]
+## Phase 7: Two-Tier Caching Fix [DONE]
 
 Fix Bug 6 by replacing the single-slot `layer_cache["last_output"]` with a dedicated
 `layer_cache["full_block_output"]` that small-block recomputes cannot overwrite.
 
-- [ ] Implement two-tier caching in wrapper (recompute + reuse paths)
-- [ ] Update trim logic to use `full_block_output` instead of `last_output`
-- [ ] Run all 9 configs on GSM8K `--limit 10` — verify middle/last recovery
-- [ ] If successful, run full GSM8K (all 9 configs) for final results
+- [x] Implement two-tier caching in wrapper (recompute + reuse paths)
+- [x] Update trim logic to use `full_block_output` instead of `last_output`
+- [x] Run all 9 configs on GSM8K `--limit 10` — verify middle/last recovery
+- [x] Fix Bug 7: `find_results_file()` in `log_utils.py` picked arbitrary results file
+- [ ] Run full GSM8K (all 9 configs) for final results
 - [ ] Update results.md with corrected numbers
 
 > Fix design in [debugging.md](debugging.md#fix-two-tier-caching).
+
+### Validation Results: GSM8K limit_10 (Mar 7, Post-Fix)
+
+All 9 configs produce 70% accuracy — middle/last collapse fully resolved.
+
+| Config | Accuracy | Notes |
+|--------|----------|-------|
+| k1_first | 70% | No reuse (k=1) |
+| k1_middle | 70% | No reuse (k=1) |
+| k1_last | 70% | No reuse (k=1) |
+| k2_first | 70% | OK |
+| k2_middle | 70% | RECOVERED (was 10%) |
+| k2_last | 70% | RECOVERED (was 10%) |
+| k3_first | 70% | OK |
+| k3_middle | 70% | RECOVERED (was 0%) |
+| k3_last | 70% | RECOVERED (was 0%) |
+
+> Note: All configs showing identical accuracy on limit_10 is expected — 10 samples
+> is too few to differentiate. Full runs needed to see accuracy vs throughput tradeoff.
