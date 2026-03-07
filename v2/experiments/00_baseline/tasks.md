@@ -23,13 +23,13 @@
 > All 9 configs produced identical accuracy (66.53%). Valid but uninformative for
 > evaluating layer reuse.
 
-## Phase 3: Remaining Tasks [PARTIALLY DONE — BLOCKED ON PHASE 6]
+## Phase 3: Remaining Tasks [PARTIALLY DONE — UNBLOCKED]
 - [x] Run MMLU limit_10 (9 configs)
 - [x] Run Minerva Math limit_10 (9 configs)
 - [x] Run IFEval limit_5 (1 config)
-- [ ] Run full Minerva Math (all 9 configs) — blocked on Phase 6
-- [ ] Run full IFEval (all 9 configs) — blocked on Phase 6
-- [ ] Run full GSM8K re-run (all 9 configs, corrected code) — blocked on Phase 6
+- [ ] Run full Minerva Math (all 9 configs)
+- [ ] Run full IFEval (all 9 configs)
+- [ ] Run full GSM8K re-run (all 9 configs, corrected code)
 
 ## Phase 4: Bug Fixes [DONE]
 
@@ -50,7 +50,7 @@ throughput measurements. Accuracy measurements are still valid.
 - [x] Fix Bug 5: `reuse_state["count"] = 0` instead of `reuse_state["enabled"] = False`
 - [x] Re-run all 9 configs on GSM8K `--limit 10` — Feb 16 (Run 2)
 - [x] Email update to Dr. Lin re: bugs found, old results suspect
-- [ ] Submit full SLURM runs once Phase 6 resolves middle/last collapse
+- [x] Submit full SLURM runs — Phase 6 resolved, see Phase 8
 
 > Bug 5 fix solved runaway generation (18K -> 3.5K tokens) but accuracy for middle/last
 > still 0-10%. See [debugging.md](debugging.md#bug-5-moderate-fixed---feb-16-stale-cache-from-disabled-wrappers-during-full-block-forwards).
@@ -105,10 +105,8 @@ Fix Bug 6 by replacing the single-slot `layer_cache["last_output"]` with a dedic
 
 - [x] Implement two-tier caching in wrapper (recompute + reuse paths)
 - [x] Update trim logic to use `full_block_output` instead of `last_output`
-- [x] Run all 9 configs on GSM8K `--limit 10` — verify middle/last recovery
+- [x] Run all 9 configs on GSM8K `--limit 10` — verified middle/last recovery
 - [x] Fix Bug 7: `find_results_file()` in `log_utils.py` picked arbitrary results file
-- [ ] Run full GSM8K (all 9 configs) for final results
-- [ ] Update results.md with corrected numbers
 
 > Fix design in [debugging.md](debugging.md#fix-two-tier-caching).
 
@@ -130,3 +128,16 @@ All 9 configs produce 70% accuracy — middle/last collapse fully resolved.
 
 > Note: All configs showing identical accuracy on limit_10 is expected — 10 samples
 > is too few to differentiate. Full runs needed to see accuracy vs throughput tradeoff.
+
+## Phase 8: Scaled Validation & Full Runs [IN PROGRESS]
+
+Limit_10 confirmed the fix works but all configs show identical accuracy (10 samples
+too few to differentiate). Running limit_100 via sbatch to get meaningful signal before
+committing to full runs.
+
+- [~] Run all 9 configs on GSM8K `--limit 100` via sbatch (submitted Mar 7)
+- [ ] Analyze limit_100 results — confirm accuracy differentiation across k and subset
+- [ ] Run full GSM8K (all 9 configs, 1319 samples)
+- [ ] Run full Minerva Math (all 9 configs)
+- [ ] Run full IFEval (all 9 configs)
+- [ ] Update results.md with final numbers
