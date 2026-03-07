@@ -65,50 +65,41 @@ def _patch_layers_helper(model, reuse_k, subset_name, reuse_state):
 
             if should_recompute:
                 output = original_forward(*args, **kwargs)
-                # Cache the output (Hidden States are usually the first element if tuple, or just the tensor)
-                # Transformers usually return (hidden_states, present_key_values, ...)
-                # We only cache the tensor part if it's a tuple, or the tensor itself.
-                layer_cache["is_tuple"] = isinstance(output, tuple)
-                if layer_cache["is_tuple"]:
-                    layer_cache["last_output"] = output[0]
-                else:
-                    layer_cache["last_output"] = output
+                tensor = output[0] if isinstance(output, tuple) else output
+                current_input = args[0]
+
+                # Only update the reuse cache during full-block forwards.
+                # Full-block forwards produce output with more tokens than the
+                # small-block input (32 > 8). Small-block recomputes must NOT
+                # overwrite the full-block cache — that causes cross-small-block
+                # contamination (Bug 6).
+                if tensor.shape[1] > current_input.shape[1]:
+                    layer_cache["full_block_output"] = tensor
+                    layer_cache["is_tuple"] = isinstance(output, tuple)
+
                 return output
             else:
-                # Reuse Step!
-                if "last_output" in layer_cache:
-                    cached_tensor = layer_cache["last_output"]
-
-                    # --- FIX: SLICING LOGIC ---
-                    # The next layer expects input of shape [B, current_seq_len, D].
-                    # Our cached tensor is [B, full_block_size, D].
-                    # We must slice the cache to match the current request.
-
-                    current_input = args[0]  # The hidden states passed to this layer
+                # Reuse: always slice from the full-block cache (32 tokens).
+                # This avoids cross-small-block contamination — the 32-token
+                # cache covers all positions, and replace_position selects
+                # the correct 8-token slice.
+                if "full_block_output" in layer_cache:
+                    cached_tensor = layer_cache["full_block_output"]
+                    current_input = args[0]
                     current_len = current_input.shape[1]
+                    replace_pos = kwargs.get("replace_position") or 0
 
-                    if cached_tensor.shape[1] == current_len:
-                        # Shapes match (rare in block decoding), return as is
-                        output_tensor = cached_tensor
+                    if replace_pos + current_len <= cached_tensor.shape[1]:
+                        output_tensor = cached_tensor[
+                            :, replace_pos : replace_pos + current_len, :
+                        ]
                     else:
-                        # Shapes mismatch. Use replace_position to find the correct slice.
-                        # replace_position indicates where in the block we are currently writing.
-                        replace_pos = kwargs.get("replace_position") or 0
-
-                        # Safety Check: Ensure slice is within bounds
-                        if replace_pos + current_len <= cached_tensor.shape[1]:
-                            output_tensor = cached_tensor[
-                                :, replace_pos : replace_pos + current_len, :
-                            ]
-                        else:
-                            # If we can't slice correctly, we must fallback to recompute to avoid crash
-                            return original_forward(*args, **kwargs)
+                        return original_forward(*args, **kwargs)
 
                     if layer_cache.get("is_tuple", False):
                         return (output_tensor,)
                     else:
                         return output_tensor
-
                 else:
                     return original_forward(*args, **kwargs)
 
@@ -408,12 +399,10 @@ class Fast_dLLM_QwenForCausalLM:
                 # --- TRIM LOCAL LAYER CACHES ---
                 if "caches" in reuse_state:
                     for layer_id, layer_cache in reuse_state["caches"].items():
-                        if "last_output" in layer_cache:
-                            # cached_tensor shape: [Batch, Seq, Dim]
-                            # We filter along dim 0 (Batch) using ~finished_flag
-                            layer_cache["last_output"] = layer_cache["last_output"][
-                                ~finished_flag
-                            ]
+                        if "full_block_output" in layer_cache:
+                            layer_cache["full_block_output"] = layer_cache[
+                                "full_block_output"
+                            ][~finished_flag]
 
                 # 3. TRIM KV CACHE
                 if past_key_values is not None:

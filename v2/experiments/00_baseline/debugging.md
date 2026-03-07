@@ -168,162 +168,173 @@ that may have been essential for correctness:
 
 ---
 
-## Phase 6: Investigation
+## Phase 6: Investigation [RESOLVED — Mar 7, 2026]
 
-### Context
+### Root Cause: Cross-Small-Block Cache Contamination (Bug 6)
 
-**The problem**: Our refactored `generation_functions.py` produces correct results for
-the `first` layer subset but collapses to 0-10% accuracy for `middle`/`last` (k>=2).
-The old code (commit `8e18baac`) produced **uniform accuracy across all subsets**
-(~73% for k=2, ~67% for k=3 on full GSM8K). So the collapse is a regression in our
-code, not an architectural limitation.
+**Status**: Root cause identified. Fix planned (two-tier caching).
 
-**How layer reuse works**: We monkey-patch 12 transformer layer `.forward()` methods
-with wrappers (`_patch_layers_helper` in `generation_functions.py`). On recompute steps
-(`step % k == 0`), wrappers call `original_forward()` and cache the output. On reuse
-steps (`step % k != 0`), wrappers return the cached output (sliced via `replace_position`
-if the cached shape [B,32,D] doesn't match the input shape [B,8,D]).
+**The problem**: Middle/last subsets collapse to 0-10% accuracy (k>=2) while first
+subset works. The wrapper's single-slot cache (`layer_cache["last_output"]`) conflates
+32-token full-block outputs with 8-token small-block outputs, causing wrong-position
+hidden states to be returned when reuse spans across different small blocks.
 
-**How block diffusion works**: Each block of 32 tokens is denoised iteratively. Within
-each block, 4 small blocks of 8 tokens are processed. The `should_recompute` flag decides
-whether to run a full-block forward (32 tokens, builds `block_past_key_values`) or a
-small-block forward (8 tokens, reads from `block_past_key_values`). Layer reuse only
-activates during small-block forwards.
+### Investigation Results
 
-**What we changed from old code (4 bug fixes)** — see [Bug Details](#bug-details) above:
-- Bug 1 fix: Removed `original_forward()` call on the reuse path (was used for isinstance
-  check). This means reuse steps now truly skip computation.
-- Bug 2 fix: Removed `reuse_k <= 1` and `reuse_step % reuse_k == 0` from `should_recompute`.
-  This was conflating block cache and layer reuse logic. **Side-effect lost**: the old code
-  forced full-block forwards every k steps, keeping layer caches fresh with 32-token outputs.
-- Bug 3 fix: `first` subset now patches 12 layers (was 11).
-- Bug 4 fix: Layer caches registered in `reuse_state["caches"]` for batch trim logic.
+#### A. `replace_position` propagation: NOT the bug
 
-**What we tried so far** (Feb 16, Bug 5 fix): Changed full-block forward handling from
-`reuse_state["enabled"] = False` (disables wrappers entirely — no caching) to
-`reuse_state["count"] = 0` (forces wrappers to recompute — `0 % k == 0` for all k).
-This fixed the runaway gibberish (18-20K tokens -> ~3,500) but accuracy stayed at 0-10%.
+Reviewed the custom `modeling.py` from `Efficient-Large-Model/Fast_dLLM_v2_7B`
+(HuggingFace, `trust_remote_code=True`). The model is Qwen2.5-based with custom
+block diffusion code.
 
-**Key evidence: Old full GSM8K results disprove "layer sensitivity" hypothesis**
+`replace_position` IS explicitly propagated through the full chain:
 
-The full GSM8K runs (Phase 1, Jan 2026, commit `8e18baac`) show uniform accuracy
-across all subsets for each k value:
+```
+Fast_dLLM_QwenForCausalLM.forward(replace_position=X)
+  -> Fast_dLLM_QwenModel.forward(replace_position=X)
+    -> for decoder_layer in self.layers:
+         decoder_layer(hidden_states, ..., replace_position=X)  # explicit kwarg
+           -> Fast_dLLM_QwenDecoderLayer.forward(replace_position=X)
+             -> self.self_attn(..., replace_position=X)
+```
 
-| k | first | middle | last |
-|---|-------|--------|------|
-| 1 | 80.44% | 80.44% | 80.44% |
-| 2 | 73.69% | 73.62% | 73.77% |
-| 3 | 67.17% | 67.55% | 67.70% |
+Both `Fast_dLLM_QwenDecoderLayer.forward()` and `Fast_dLLM_QwenAttention.forward()`
+have `replace_position: Optional[int] = None` in their signatures. Our wrapper receives
+it via `**kwargs`. The slicing math (`kwargs.get("replace_position") or 0`) is correct.
 
-The accuracy drop from k1->k2->k3 proves layer reuse WAS affecting accuracy (it wasn't
-no-op). However, the uniformity across subsets is now understood to be an artifact of
-Bug 1 — `original_forward()` ran as a side-effect on every reuse step, keeping the
-model's internal state (block cache, attention) coherent regardless of which layers
-returned cached values.
+**Model source**: `modeling.py` and `configuration.py` at
+`https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B`
 
-### Key files
+#### B-F. Superseded by Bug 6 discovery
 
-- Current code: `v2/experiments/00_baseline/generation_functions.py`
-- Old working code: `git show 8e18baac:v2/generation_functions.py`
-- Experiment proposal: `v2/experiments/00_baseline/proposal.md`
-- Results: `v2/experiments/00_baseline/artifacts/gsm8k/` (full) and `gsm8k_limit_10/`
+The root cause was found through code analysis of the wrapper + model interaction,
+making the experimental tests (B-F) unnecessary.
 
-### Investigation checklist
+### Bug 6: Cross-Small-Block Cache Contamination
 
-Start with A (quick code read), then B and C (each is a small code change + limit_10
-run). D and E provide supporting evidence. F is the fallback if nothing else works.
+**File**: `generation_functions.py`, wrapper reuse path (lines 77-113)
+**Impact**: Middle/last subsets produce wrong-position hidden states → 0-10% accuracy
 
-- [ ] **A. Check `replace_position` propagation** (code read, ~30 min)
+#### Mechanism
 
-  The wrapper slices cached 32-token output using `kwargs.get("replace_position")`.
-  But `replace_position` is passed to `self.forward()` (the model), not directly to
-  individual layers. If the model doesn't pass it through to layer kwargs, the wrapper
-  always sees `replace_position=None` -> `replace_pos = 0` -> always slices positions
-  0-7 regardless of which small block is being processed.
+The wrapper uses a single cache slot (`layer_cache["last_output"]`) that gets
+overwritten on every recompute, whether full-block (32 tokens) or small-block (8 tokens).
+When reuse spans across different small blocks, the cached 8-token tensor from one
+small block is returned for a different small block's positions.
 
-  **How to check**: Read the model's forward method. The model is
-  `Efficient-Large-Model/Fast_dLLM_v2_7B` (Qwen-based). Trace how `replace_position`
-  flows from `model.forward()` -> `model.model.forward()` -> individual `layer.forward()`
-  calls. Check the HuggingFace model files or `modeling_qwen2.py`.
+The shape-match check masks the position mismatch:
 
-  **If NOT propagated**: The wrapper's slicing is broken for small blocks 1-3 (always
-  returns positions 0-7). This would affect all subsets equally in the old code (uniform
-  degradation), but could interact differently with our bug fixes to cause subset-dependent
-  failure. This finding would change our entire approach.
+```python
+if cached_tensor.shape[1] == current_len:  # 8 == 8 → True!
+    output_tensor = cached_tensor  # Returns positions 0-7 for positions 8-15!
+```
 
-  **If propagated**: Slicing works correctly and the issue is elsewhere.
+#### Step-by-step trace
 
-- [ ] **B. Test: restore periodic full-block forwards** (code change + run, ~2 hours)
+Processing a 32-token block with k=2, small_block_size=8:
 
-  Add back `reuse_step % reuse_k == 0` to `should_recompute` (from the old Bug 2).
-  Keep the Bug 5 fix (`count=0`), do NOT revert to `enabled=False`. This tests whether
-  more frequent cache refreshes rescue middle/last accuracy.
+1. **Iter 0, sb_idx=0**: `should_recompute=True` (no block cache). Full-block forward.
+   `count=0` → wrappers recompute. Cache becomes **[B, 32, D]**. `reuse_step=1`.
 
-  In `generation_functions.py`, change the `should_recompute` block (~line 280) to:
-  ```python
-  should_recompute = (
-      block_past_key_values is None
-      or (reuse_step % reuse_k == 0)  # periodic cache refresh
-      or (x_t[:, -block_size + small_block_start_idx] == mask_id).any()
-  )
-  ```
-  Run all 9 configs with `--limit 10`.
+2. **Iter 1, sb_idx=0**: Position 0 unmasked → small-block (8 tokens, `replace_pos=0`).
+   `count=1`, `1%2≠0` → **REUSE**. Cache is [B,32,D], slice [:, 0:8, :] → **CORRECT**.
 
-  **If accuracy recovers** (~60-70% for middle/last): The issue is that our current code
-  doesn't refresh caches frequently enough. We then need to find a way to refresh caches
-  without forcing expensive full-block forwards every k steps.
+3. **Iter 2, sb_idx=0**: Small-block. `count=2`, `2%2==0` → **RECOMPUTE**. Runs 8-token
+   forward. **Cache overwritten to [B, 8, D]** (positions 0-7). `reuse_step=3`.
 
-  **If accuracy stays at 0-10%**: The issue is NOT cache refresh frequency. Move to C.
+4. **(Move to sb_idx=1)**
 
-- [ ] **C. Test: reinstate Bug 1 side-effect** (code change + run, ~2 hours)
+5. **Iter 3, sb_idx=1**: Position 8 already unmasked → small-block (8 tokens,
+   `replace_pos=8`). `count=3`, `3%2≠0` → **REUSE**.
 
-  Add back the `original_forward()` call on the reuse path (as a diagnostic, discarding
-  the result). This tests whether the side-effect computation is necessary for correctness.
+   ```
+   cached_tensor.shape[1] = 8   (from step 3, positions 0-7)
+   current_len = 8              (for positions 8-15)
+   8 == 8 → shape match! → returns cached as-is
+   → Returns hidden states for positions 0-7 when positions 8-15 are needed!
+   ```
 
-  In `generation_functions.py`, in the wrapper's reuse path (~line 77-110), add before
-  the return:
-  ```python
-  # Diagnostic: run original_forward as side-effect (like old Bug 1)
-  _ = original_forward(*args, **kwargs)
-  ```
-  Run all 9 configs with `--limit 10`.
+#### Why `first` works but `middle`/`last` collapse
 
-  **If accuracy recovers**: Bug 1's side-effect was load-bearing. The attention computation
-  in `original_forward` was updating block cache entries or other mutable state. We need
-  to understand what state and find a targeted fix (not the full side-effect).
+When layers 1-12 (`first`) return wrong-position hidden states, **16 subsequent correct
+layers** (13-27) compute fresh attention against the correct block cache K,V and can
+compensate for the bad input.
 
-  **If accuracy stays at 0-10%**: Bug 1 side-effect is not the cause. The issue is purely
-  in Bug 2 (should_recompute frequency) or something else entirely.
+When layers 16-27 (`last`) return wrong-position hidden states, **zero layers** follow
+to correct. The LM head receives garbage directly → catastrophic failure.
 
-- [ ] **D. Add instrumentation** (code change, ~1 hour)
+When layers 8-19 (`middle`) return wrong hidden states, only **8 layers** (20-27) try
+to correct → insufficient.
 
-  Add counters/logging to the wrapper to understand actual behavior:
-  - Per-layer: count of recompute vs reuse decisions per block
-  - Cache tensor shape at each reuse decision ([B,32,D] vs [B,8,D])
-  - `replace_position` value received (or None) at each wrapper call
-  - Whether the shape-match branch or slice branch is taken
+#### Why old code was immune
 
-  Run one config (e.g., k2_middle) with `--limit 1` and analyze the log.
+Both load-bearing bugs prevented this scenario:
 
-- [ ] **E. Run old code on limit_10** (checkout + run, ~2 hours)
+- **Bug 1**: `original_forward()` ran as side-effect → attention updated block cache
+  entries → consistent state regardless of what hidden states were returned.
 
-  `git stash && git checkout 8e18baac -- v2/generation_functions.py` and run all 9
-  configs with `--limit 10`. This gives a direct comparison on the small sample.
-  Restore after: `git checkout HEAD -- v2/generation_functions.py && git stash pop`.
+- **Bug 2**: `reuse_step % reuse_k == 0` in `should_recompute` → forced full-block
+  forwards every k-th step → wrappers frequently got fresh 32-token caches →
+  the 8-token cache rarely persisted long enough to contaminate a different small block.
 
-  **Purpose**: Confirm the old code gives ~60-70% for middle/last on limit_10 (proving
-  the limit_10 sample is viable for detecting the regression).
+#### Block cache mutation during small-block forwards
 
-- [ ] **F. Diff-driven bisection** (multiple runs, ~4-8 hours)
+The model's `Fast_dLLM_QwenAttention.forward()` WRITES into `block_past_key_values`
+during small-block forwards (not just reads):
 
-  If A-C don't identify the cause, systematically revert individual bug fixes (one at
-  a time) on the current code and test each:
-  1. Revert Bug 1 fix only (reinstate isinstance + original_forward)
-  2. Revert Bug 2 fix only (add back `reuse_k <= 1` and `reuse_step % reuse_k == 0`)
-  3. Revert Bug 3 fix only (change `range(1, subset_size + 1)` back to `range(1, min(n, subset_size))`)
-  4. Revert Bug 4 fix only (remove `reuse_state["caches"]` registration)
+```python
+# When block cache already exists for this layer:
+block_cache_key_states[:, :, replace_position:replace_position+key_states.shape[2]] = key_states
+block_cache_value_states[:, :, replace_position:replace_position+value_states.shape[2]] = value_states
+```
 
-  Each revert + run isolates one fix. The one that recovers accuracy is the culprit.
+When a layer is skipped (wrapper returns cached hidden states), its attention does not
+run → its K,V in `block_past_key_values` are NOT updated at `replace_position` for the
+current tokens. This is a secondary inconsistency (stale K,V for skipped layers) but is
+tolerable by design — the K,V from the full-block forward are a reasonable approximation.
+
+### Fix: Two-Tier Caching
+
+Replace the single-slot cache with a dedicated full-block cache that small-block
+recomputes cannot overwrite. On reuse, always slice from the full-block cache.
+
+**Recompute path**:
+```python
+output = original_forward(*args, **kwargs)
+tensor = output[0] if isinstance(output, tuple) else output
+current_input = args[0]
+
+# Only update reuse cache during full-block forwards
+if tensor.shape[1] > current_input.shape[1]:
+    layer_cache["full_block_output"] = tensor
+    layer_cache["is_tuple"] = isinstance(output, tuple)
+
+return output
+```
+
+**Reuse path**:
+```python
+if "full_block_output" in layer_cache:
+    cached = layer_cache["full_block_output"]   # Always 32 tokens
+    replace_pos = kwargs.get("replace_position") or 0
+    current_len = args[0].shape[1]
+    output_tensor = cached[:, replace_pos:replace_pos+current_len, :]
+    return (output_tensor,) if layer_cache.get("is_tuple") else output_tensor
+else:
+    return original_forward(*args, **kwargs)     # No cache yet
+```
+
+**Why this works**:
+- Full-block forwards (count=0) populate a 32-token cache
+- Small-block recomputes run normally but DO NOT overwrite the 32-token cache
+- Reuse ALWAYS slices from the 32-token cache using the correct `replace_position`
+- Cross-small-block transitions are safe because the 32-token cache covers all positions
+- Trim logic updates `full_block_output` instead of `last_output`
+
+**Tradeoff**: The cached hidden states are always from the most recent full-block forward.
+As tokens change during denoising, the cache becomes stale. This staleness is the intended
+tradeoff of layer reuse — the same tradeoff that produced ~73% (k=2) and ~67% (k=3)
+accuracy in the old code.
 
 ---
 

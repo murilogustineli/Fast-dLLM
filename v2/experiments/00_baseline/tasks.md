@@ -85,18 +85,28 @@ throughput measurements. Accuracy measurements are still valid.
 | k3_middle | **0%** | 38.64 | Wrong answers |
 | k3_last | **0%** | 38.70 | Wrong answers |
 
-## Phase 6: Investigation [IN PROGRESS]
+## Phase 6: Investigation [DONE]
 
-Middle/last subsets collapse to 0-10% accuracy (k>=2) while first subset works correctly.
-This is a regression from fixing load-bearing bugs in the old code, not an architectural
-limitation.
+Root cause identified: cross-small-block cache contamination (Bug 6). The wrapper's
+single-slot cache conflates 32-token full-block outputs with 8-token small-block outputs.
+When reuse spans across different small blocks, wrong-position hidden states are returned.
 
-> Full investigation context, old code analysis, and checklist in
-> [debugging.md](debugging.md#phase-6-investigation).
+- [x] A. Check `replace_position` propagation — confirmed it DOES propagate (not the bug)
+- [x] Root cause found via code analysis — Bug 6 (cross-small-block cache contamination)
+- [~] B-F superseded by Bug 6 discovery
 
-- [ ] A. Check `replace_position` propagation (code read)
-- [ ] B. Test: restore periodic full-block forwards
-- [ ] C. Test: reinstate Bug 1 side-effect
-- [ ] D. Add instrumentation
-- [ ] E. Run old code on limit_10
-- [ ] F. Diff-driven bisection (fallback)
+> Full analysis, step-by-step trace, and fix design in
+> [debugging.md](debugging.md#phase-6-investigation-resolved--mar-7-2026).
+
+## Phase 7: Two-Tier Caching Fix [TODO]
+
+Fix Bug 6 by replacing the single-slot `layer_cache["last_output"]` with a dedicated
+`layer_cache["full_block_output"]` that small-block recomputes cannot overwrite.
+
+- [ ] Implement two-tier caching in wrapper (recompute + reuse paths)
+- [ ] Update trim logic to use `full_block_output` instead of `last_output`
+- [ ] Run all 9 configs on GSM8K `--limit 10` — verify middle/last recovery
+- [ ] If successful, run full GSM8K (all 9 configs) for final results
+- [ ] Update results.md with corrected numbers
+
+> Fix design in [debugging.md](debugging.md#fix-two-tier-caching).
