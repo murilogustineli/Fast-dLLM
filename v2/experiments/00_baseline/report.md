@@ -160,14 +160,18 @@ effect is the main explanation).
 
 ### Directions for next experiment
 
-**A. Adaptive layer skipping** (Dr. Lin's suggestion, most promising)
-- Skip layers entirely during small-block forwards — pass hidden states straight
-  through without running attention or feedforward
+**A. Adaptive layer skipping with cosine similarity** (Dr. Lin's suggestion, most promising)
+- Use k=1 (no periodic reuse schedule) with **adaptive** skipping: decide per-layer,
+  per-step whether to skip based on a similarity metric
+- Compute **cosine similarity on the Value vectors** between the current step and the
+  previous step. If similarity exceeds a threshold, skip the layer (pass hidden
+  states through); otherwise, run the full forward
 - This bypasses the block cache redundancy: skipped layers produce zero computation,
   so ALL skipped layers contribute real staleness (identity mapping ≠ fresh forward)
-- Could test different patterns: every-other-layer, bottom-N, top-N, threshold-based
-- Expected tradeoff: larger throughput gain (no FLOPs for skipped layers) but
-  potentially sharper accuracy drop (identity is a worse approximation than cached)
+- The similarity-based decision means layers are only skipped when it's safe — layers
+  with rapidly changing representations will always be computed
+- Key design questions: similarity threshold tuning, whether to measure similarity
+  on V projections only or full K/V, per-head vs per-layer decision granularity
 
 **B. Skip layers during full-block forwards**
 - The full-block forward is the biggest cost center but 00_baseline never skips
