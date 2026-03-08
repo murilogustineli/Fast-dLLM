@@ -437,7 +437,33 @@ Possible explanations:
    tokens; k2_middle and k2_last both generated 3,412. Outputs may be nearly
    identical — needs per-sample comparison.
 
-Awaiting limit_100 results to resolve.
+### limit_100 confirms: no subset differentiation, k2 ≈ k3 accuracy
+
+limit_100 results (n=100, 1% resolution):
+- k1: 80% / 80% / 80% (identical, correct)
+- k2: 53% / 54% / 55% (within 2%, no subset effect)
+- k3: 55% / 53% / 53% (within 2%, no subset effect)
+
+**This was not n=10 noise.** Subset position genuinely doesn't matter. Additionally,
+k2 and k3 produce the same accuracy (~53-55%), which contradicts the expectation
+that more aggressive reuse = more degradation.
+
+Explanation #2 (two-tier cache equalizes subsets) is likely correct. But the k2 ≈ k3
+finding is new and unexplained. Possible causes:
+- **Accuracy saturation**: Even k=2 corrupts enough hidden states that the model's
+  error-correction capacity is already maxed. Further corruption (k=3) doesn't make
+  answers more wrong — it just makes outputs more verbose/repetitive.
+- **flexible-extract is forgiving**: The accuracy metric extracts the answer from
+  anywhere in the output. k=3 may produce correct answers early, then degenerate.
+  The metric wouldn't distinguish "correct answer + garbage" from "correct answer".
+- **Implementation issue**: Possible that the wrapper isn't actually differentiating
+  k=2 from k=3 in practice. Needs verification (see Phase 10 in tasks.md).
+
+### GPU contention in sbatch runs
+
+k2_first and k2_last were scheduled on the same node (004-25) and both showed ~18
+tok/s — roughly half normal throughput. Two GPU-bound jobs sharing a single-GPU node.
+Their throughput numbers are invalid; accuracy is still reliable.
 
 ---
 

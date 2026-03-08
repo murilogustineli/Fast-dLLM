@@ -136,7 +136,8 @@ limit_100 sbatch submitted (Mar 8).
 
 - [x] Remove debug prints from `generation_functions.py`
 - [x] Run all 9 configs on GSM8K `--limit 10` — verify differentiation across configs
-- [ ] Run all 9 configs on GSM8K `--limit 100` via sbatch (submitted Mar 8)
+- [x] Run all 9 configs on GSM8K `--limit 100` via sbatch (Mar 8)
+- [ ] Verify implementation correctness (see Phase 10)
 - [ ] If results look correct, run full GSM8K (all 9 configs, 1319 samples)
 - [ ] Run full Minerva Math and IFEval
 - [ ] Update results.md with final numbers
@@ -166,3 +167,51 @@ limit_100 sbatch submitted (Mar 8).
 
 **Open question:** Does subset position matter? Need limit_100 to resolve (10% accuracy
 resolution at n=10 is too coarse).
+
+### Validation Results: GSM8K limit_100 (Mar 8)
+
+| Config | Accuracy | Tokens | Time (s) | Tok/s | Notes |
+|--------|----------|--------|----------|-------|-------|
+| k1_first | 80% | 31,941 | 714.7 | 44.7 | |
+| k1_middle | 80% | 31,941 | 726.4 | 44.0 | |
+| k1_last | 80% | 31,941 | 715.5 | 44.6 | |
+| k2_first | 53% | 37,193 | 1,967.1 | 18.9 | GPU contention (shared node) |
+| k2_middle | 54% | 35,656 | 870.3 | 41.0 | |
+| k2_last | 55% | 35,688 | 1,933.3 | 18.5 | GPU contention (shared node) |
+| k3_first | 55% | 47,951 | 987.6 | 48.6 | |
+| k3_middle | 53% | 45,934 | 964.2 | 47.6 | |
+| k3_last | 53% | 45,646 | 958.1 | 47.6 | |
+
+**Key findings:**
+- k1 baselines identical (80% acc, 31,941 tokens) — correct
+- k2 ≈ k3 accuracy (~53-55%) — degradation saturates, no further drop from k2 to k3
+- k2_first/k2_last throughput invalid (GPU contention on shared node 004-25)
+- k3 throughput ~48 tok/s vs ~44 tok/s baseline (~1.1x) — modest improvement
+- k3 generates ~46% more tokens than baseline (repetition/inflation)
+- **No subset differentiation at n=100** — first/middle/last within 2% for both k2 and k3
+
+**Concern:** k2 ≈ k3 accuracy and zero subset differentiation are suspicious. Need to
+verify implementation correctness before drawing conclusions. See Phase 10.
+
+## Phase 10: Implementation Verification [TODO]
+
+Before presenting results to Dr. Lin, verify the layer reuse implementation is correct.
+Two suspicious findings need explanation: (1) k=2 and k=3 produce the same accuracy,
+and (2) first/middle/last subsets show zero differentiation.
+
+- [ ] **A. Per-sample output diff**: Compare actual generated text between k2_first vs
+      k2_middle vs k2_last for the same input samples. If outputs are IDENTICAL across
+      subsets, the subsets aren't actually targeting different layers (bug). If outputs
+      differ but accuracy is similar, the effect is real but small.
+- [ ] **B. Verify layer indices**: Confirm first=[1-12], middle=[8-19], last=[16-27]
+      are actually being patched. Run a single sample and log which layers have modified
+      `.forward()` methods.
+- [ ] **C. Wrapper call verification**: Add lightweight instrumentation (single sample)
+      to confirm: (a) wrapper is called, (b) reuse path is taken on the right steps,
+      (c) cached tensor is actually different from freshly computed tensor.
+- [ ] **D. Cache staleness check**: On a reuse step, compute the original forward AND
+      return the cached value. Log the L2 distance between them. This measures how
+      "stale" the cache actually is — if distance is ~0, layer reuse has no effect
+      regardless of which layers are targeted.
+- [ ] **E. k=2 vs k=3 output diff**: Compare generated text between k2_first and
+      k3_first for the same inputs. If identical, something is masking the k difference.
