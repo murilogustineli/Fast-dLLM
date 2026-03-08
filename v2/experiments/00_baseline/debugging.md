@@ -393,6 +393,54 @@ accuracy in the old code.
 
 ---
 
+## Phase 9: Observations (Mar 8, 2026)
+
+### Throughput: k=2 provides no speedup
+
+Layer reuse only skips computation during **small-block forwards** (8 tokens). The
+full-block forward (32 tokens) — the most expensive step in each denoising cycle —
+always runs all layers (required to build `block_past_key_values`). With k=2, only
+every other small-block iteration skips 12/28 layers. The FLOP savings are too small
+to offset the wrapper overhead.
+
+- k=1 baseline: ~36 tok/s
+- k=2: ~30-36 tok/s (no improvement)
+- k=3: ~51-55 tok/s (~1.4-1.5x improvement)
+
+k=3 skips 2/3 of small-block steps for 12 layers, crossing the threshold where
+savings exceed overhead.
+
+### Quality: k=3 causes repetition and output inflation
+
+k=3 configs generate ~2x the tokens of baseline (6,800 vs 3,500) due to repetitive
+output ("Janet Janet Janet..."). The model gets stuck in repetition loops because
+stale cached hidden states don't carry enough signal to properly terminate generation.
+
+This means the **wall-clock time is longer** for k=3 (123-133s vs 82-98s) despite
+higher tokens/second. The throughput metric is misleading for practical use — the
+speedup is per-token, but the model generates far more (mostly garbage) tokens.
+
+### No subset differentiation at n=10
+
+All k=2 configs produced 50% accuracy. All k=3 configs produced 30% accuracy. No
+observable difference between first/middle/last subsets.
+
+Possible explanations:
+1. **n=10 noise**: With 10 samples, accuracy resolution is 10% steps. Subset
+   differences may exist but be smaller than 10%.
+2. **Two-tier cache equalizes subsets**: The Bug 6 fix (always slice from 32-token
+   cache using correct `replace_position`) may have eliminated the position-dependent
+   failure mode that previously caused middle/last to collapse. All subsets now
+   receive correctly-positioned (but stale) hidden states, making the degradation
+   uniform regardless of which layers are reused.
+3. **Token count similarity**: k3_first and k3_middle both generated exactly 6,806
+   tokens; k2_middle and k2_last both generated 3,412. Outputs may be nearly
+   identical — needs per-sample comparison.
+
+Awaiting limit_100 results to resolve.
+
+---
+
 ## Known Issues
 
 - Layer reuse does NOT apply to loglikelihood tasks (MMLU, GPQA) - see docs/experiments/00-layer-reuse-loglikelihood.md

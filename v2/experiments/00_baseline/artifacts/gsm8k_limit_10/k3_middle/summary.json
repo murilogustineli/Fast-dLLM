@@ -1,12 +1,12 @@
 {
   "task": "gsm8k",
   "config": "k3_middle",
-  "timestamp": "20260307_162138",
-  "accuracy": 0.7,
+  "timestamp": "20260308_141537",
+  "accuracy": 0.3,
   "throughput": {
-    "tokens_generated": 3540,
-    "total_time_s": 99.73,
-    "tokens_per_s": 35.5
+    "tokens_generated": 6806,
+    "total_time_s": 123.4,
+    "tokens_per_s": 55.16
   },
   "gpu_info": {
     "gpu_available": true,
@@ -17,15 +17,15 @@
     "driver_version": "575.57.08"
   },
   "git": {
-    "commit": "b4838b803617037690802479eb79eaea8b78a018",
+    "commit": "0500d4d8fcb0d36a19f414990de577d4203719ea",
     "branch": "main",
     "dirty": true
   },
   "environment": {
     "python_version": "3.12.3",
     "torch_version": "2.10.0+cu128",
-    "hostname": "atl1-1-03-003-17-0.pace.gatech.edu",
-    "slurm_job_id": "4678502"
+    "hostname": "atl1-1-03-004-33-0.pace.gatech.edu",
+    "slurm_job_id": "4695698"
   },
   "model_args": {
     "model_path": "Efficient-Large-Model/Fast_dLLM_v2_7B",

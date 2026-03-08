@@ -129,13 +129,40 @@ fell through to `original_forward()`.
 
 > All limit_100 results invalid. See [debugging.md](debugging.md#bug-8-critical-fixed---mar-7-full_block_output-cache-never-populated).
 
-## Phase 9: Re-validation with Bug 8 Fix [TODO]
+## Phase 9: Re-validation with Bug 8 Fix [IN PROGRESS]
 
-Bug 8 fix confirmed working on limit_2. Need to clean up debug prints and re-run.
+Bug 8 fix confirmed working on limit_2 (Mar 7). Debug prints removed, limit_10 complete,
+limit_100 sbatch submitted (Mar 8).
 
-- [ ] Remove debug prints from `generation_functions.py`
-- [ ] Run all 9 configs on GSM8K `--limit 10` — verify differentiation across configs
-- [ ] Run all 9 configs on GSM8K `--limit 100` via sbatch
+- [x] Remove debug prints from `generation_functions.py`
+- [x] Run all 9 configs on GSM8K `--limit 10` — verify differentiation across configs
+- [ ] Run all 9 configs on GSM8K `--limit 100` via sbatch (submitted Mar 8)
 - [ ] If results look correct, run full GSM8K (all 9 configs, 1319 samples)
 - [ ] Run full Minerva Math and IFEval
 - [ ] Update results.md with final numbers
+
+### Validation Results: GSM8K limit_10 (Mar 8)
+
+| Config | Accuracy | Tokens | Time (s) | Tok/s |
+|--------|----------|--------|----------|-------|
+| k1_first | 70% | 3,540 | 81.9 | 43.2 |
+| k1_middle | 70% | 3,540 | 97.9 | 36.2 |
+| k1_last | 70% | 3,540 | 97.8 | 36.2 |
+| k2_first | 50% | 3,380 | 94.9 | 35.6 |
+| k2_middle | 50% | 3,412 | 95.7 | 35.7 |
+| k2_last | 50% | 3,412 | 114.4 | 29.8 |
+| k3_first | 30% | 6,806 | 133.3 | 51.0 |
+| k3_middle | 30% | 6,806 | 123.4 | 55.2 |
+| k3_last | 30% | 6,742 | 129.6 | 52.0 |
+
+**Key findings:**
+- k1 baselines identical (70% acc, 3540 tokens) — confirms k=1 disables reuse correctly
+- Accuracy degrades with k: 70% → 50% (k=2) → 30% (k=3). Layer reuse is active.
+- k3 shows ~1.4-1.5x throughput improvement (51-55 tok/s vs ~36 tok/s baseline)
+- k2 shows NO throughput improvement (~30-36 tok/s, same or slower than baseline)
+- No differentiation across subsets (all k2=50%, all k3=30%) — may be n=10 noise
+- k3 generates ~2x tokens due to repetition (6,800 vs 3,500) — inflates wall-clock time
+- Token counts suspiciously similar within k groups (k3_first = k3_middle = 6,806)
+
+**Open question:** Does subset position matter? Need limit_100 to resolve (10% accuracy
+resolution at n=10 is too coarse).
