@@ -119,23 +119,89 @@ effect is the main explanation).
 
 ## Implications
 
-1. **The current layer reuse design is fundamentally limited.** Caching full-block
-   outputs and slicing them means only the boundary layer (first patched) has
-   meaningful staleness. Increasing the number of patched layers from 12 to 20
-   would not change the result.
+1. **The limitation is in our caching strategy, not layer reuse in general.**
+   Our implementation caches full-block outputs and slices them on reuse. This
+   is redundant with Fast-dLLM's block cache, which already preserves K/V from
+   the full-block forward — making fresh small-block computation produce nearly
+   identical results to our cached slices. Increasing the number of patched
+   layers from 12 to 20 would not change the result.
 
-2. **To make layer position matter**, the caching mechanism would need to ensure
-   all patched layers see stale values. Possible approaches:
-   - Cache per-layer inputs rather than outputs
+2. **A different layer reuse strategy could work.** To make all patched layers
+   see stale values, the approach must bypass the block cache redundancy:
+   - **Adaptive layer skipping**: Skip layers entirely (pass input through),
+     rather than running them with cached outputs
    - Invalidate block cache entries for patched layers (force stale K/V)
    - Cache at a different granularity (per-block rather than per-layer)
 
-3. **The throughput-accuracy tradeoff is poor.** k=3 gives ~1.1x speedup at 26%
-   accuracy loss (80% → ~54%). k=2 gives no speedup at all.
+3. **The throughput-accuracy tradeoff is poor for this approach.** k=3 gives
+   ~1.1x speedup at 26% accuracy loss (80% → ~54%). k=2 gives no speedup at all.
 
 4. **Non-overlapping subsets** (e.g., first=[1-9], middle=[10-18], last=[19-27])
-   would be a cleaner experimental design, but wouldn't change the fundamental
-   single-layer staleness issue.
+   would be a cleaner experimental design, but wouldn't change the core
+   caching redundancy issue.
+
+## Key Lessons for Future Experiments
+
+### What we learned about Fast-dLLM's architecture
+
+1. **The block cache is very effective.** Fresh small-block forwards (8 tokens + block
+   cache K/V) produce nearly identical output to slicing the full-block forward. Any
+   caching strategy that operates within the block cache framework will be redundant.
+
+2. **The full-block forward is the throughput bottleneck.** Layer reuse can only help
+   during small-block forwards. The full-block forward (32 tokens, all layers) must
+   run every layer to populate the block cache, and it's the most expensive step in
+   each denoising cycle. Real throughput gains require reducing cost here.
+
+3. **Layer outputs are highly similar across positions within a block.** The near-zero
+   L2 distance for layers 2-12 shows that the transformer's internal representations
+   are largely determined by the block cache K/V, not by the specific input tokens
+   at each small-block position.
+
+### Directions for next experiment
+
+**A. Adaptive layer skipping** (Dr. Lin's suggestion, most promising)
+- Skip layers entirely during small-block forwards — pass hidden states straight
+  through without running attention or feedforward
+- This bypasses the block cache redundancy: skipped layers produce zero computation,
+  so ALL skipped layers contribute real staleness (identity mapping ≠ fresh forward)
+- Could test different patterns: every-other-layer, bottom-N, top-N, threshold-based
+- Expected tradeoff: larger throughput gain (no FLOPs for skipped layers) but
+  potentially sharper accuracy drop (identity is a worse approximation than cached)
+
+**B. Skip layers during full-block forwards**
+- The full-block forward is the biggest cost center but 00_baseline never skips
+  layers there (required to populate block cache K/V entries)
+- Skipping layers in the full-block forward would give the largest throughput gain
+- Challenge: skipped layers won't populate their block cache K/V — subsequent
+  small-block forwards would crash or produce garbage
+- Possible fix: copy K/V from the previous block, or use a lightweight projection
+  instead of full attention
+
+**C. Cross-block caching**
+- Currently all layer caches are wiped between blocks (each block starts fresh)
+- If consecutive blocks produce similar hidden states, caching across blocks could
+  reduce the full-block forward cost
+- Would need to measure cross-block hidden state similarity first
+
+**D. Evaluation improvements**
+- `flexible-extract` exact_match is too forgiving — it finds the answer in garbage
+  output, making k=2 and k=3 appear equivalent
+- Future experiments should use stricter metrics: `strict-match`, IFEval
+  (instruction following), or measure output quality directly (perplexity, BLEU
+  against baseline output)
+- Should also measure **useful throughput** (tokens/second for correct answers only)
+  to avoid the k=3 inflation problem where repetitive garbage inflates tok/s
+
+### Reusable infrastructure
+
+The following from 00_baseline can be carried forward:
+- `sbatch/run.sh` and `sbatch/run_locally.sh` — smart runners with skip-completed logic
+- `verify_wrapper.py` — instrumented wrapper for measuring cache staleness (adapt for
+  new caching strategies)
+- `v2/eval.py` with `experiment_name` parameter — loads experiment-specific
+  `generation_functions.py` automatically
+- `v2/log_utils.py` — summary.json generation with throughput, git info, GPU info
 
 ## Bug History
 
