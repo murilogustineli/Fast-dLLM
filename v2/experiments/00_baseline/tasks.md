@@ -193,25 +193,24 @@ resolution at n=10 is too coarse).
 **Concern:** k2 ≈ k3 accuracy and zero subset differentiation are suspicious. Need to
 verify implementation correctness before drawing conclusions. See Phase 10.
 
-## Phase 10: Implementation Verification [TODO]
+## Phase 10: Implementation Verification [DONE]
 
-Before presenting results to Dr. Lin, verify the layer reuse implementation is correct.
-Two suspicious findings need explanation: (1) k=2 and k=3 produce the same accuracy,
-and (2) first/middle/last subsets show zero differentiation.
+Verified implementation correctness via per-sample output diffs and instrumented
+wrapper runs. Implementation is correct but the layer reuse design has a fundamental
+limitation: only 1 of 12 patched layers has meaningful cache staleness.
 
-- [ ] **A. Per-sample output diff**: Compare actual generated text between k2_first vs
-      k2_middle vs k2_last for the same input samples. If outputs are IDENTICAL across
-      subsets, the subsets aren't actually targeting different layers (bug). If outputs
-      differ but accuracy is similar, the effect is real but small.
-- [ ] **B. Verify layer indices**: Confirm first=[1-12], middle=[8-19], last=[16-27]
-      are actually being patched. Run a single sample and log which layers have modified
-      `.forward()` methods.
-- [ ] **C. Wrapper call verification**: Add lightweight instrumentation (single sample)
-      to confirm: (a) wrapper is called, (b) reuse path is taken on the right steps,
-      (c) cached tensor is actually different from freshly computed tensor.
-- [ ] **D. Cache staleness check**: On a reuse step, compute the original forward AND
-      return the cached value. Log the L2 distance between them. This measures how
-      "stale" the cache actually is — if distance is ~0, layer reuse has no effect
-      regardless of which layers are targeted.
-- [ ] **E. k=2 vs k=3 output diff**: Compare generated text between k2_first and
-      k3_first for the same inputs. If identical, something is masking the k difference.
+- [x] **A. Per-sample output diff**: Subsets produce 95-98% identical output (not a bug
+      — subsets ARE targeting different layers, but the effect is negligible)
+- [x] **B. Verify layer indices**: Confirmed first=[1-12], middle=[8-19], last=[16-27].
+      Discovered significant overlap: first∩middle=5 layers, middle∩last=4 layers.
+- [x] **C. Wrapper call + cache staleness**: Only the FIRST patched layer in each
+      subset has meaningful staleness (rel L2 ~0.68). All other 11 layers have
+      near-zero staleness (rel L2 ~0.0004). See [debugging.md](debugging.md#phase-10bc).
+- [x] **D. k=2 vs k=3 output diff**: 58% different output — k controls reuse frequency
+      correctly. k2 ≈ k3 accuracy explained by forgiving `flexible-extract` metric.
+
+> Root cause: cached hidden states are sliced from the full-block forward output.
+> Subsequent patched layers receive the same cached input in both paths, so
+> `original_forward(cached_input) ≈ cached_slice` trivially. Only the first patched
+> layer (whose input comes from an unpatched, freshly-computed layer) has stale values.
+> See [debugging.md](debugging.md#phase-10bc) and [report.md](report.md).

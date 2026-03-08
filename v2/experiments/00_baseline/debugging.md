@@ -459,6 +459,93 @@ finding is new and unexplained. Possible causes:
 - **Implementation issue**: Possible that the wrapper isn't actually differentiating
   k=2 from k=3 in practice. Needs verification (see Phase 10 in tasks.md).
 
+### Phase 10A: Per-sample output diff (Mar 8)
+
+Compared actual generated text across configs using SLURM log files (100 samples each).
+
+**Subset comparison (same k, different layers):**
+
+| Comparison | Identical | Different |
+|-----------|-----------|-----------|
+| k2_first vs k2_middle | 95/100 | 5/100 |
+| k2_first vs k2_last | 97/100 | 3/100 |
+| k2_middle vs k2_last | 98/100 | 2/100 |
+
+**k-value comparison (same subset, different k):**
+
+| Comparison | Identical | Different |
+|-----------|-----------|-----------|
+| k1_first vs k2_first | 40/100 | 60/100 |
+| k1_first vs k3_first | 35/100 | 65/100 |
+| k2_first vs k3_first | 42/100 | 58/100 |
+
+**Conclusions:**
+- Different subsets produce ~95-98% identical output. The patching IS targeting
+  different layers (outputs differ for 2-5 samples), but the effect is negligible.
+- Different k values produce ~58-65% different output. Reuse frequency has a much
+  larger effect than layer position.
+- This rules out "patching isn't working" — the subsets ARE different, they just
+  don't matter. The transformer is resilient to WHICH layers get stale caches;
+  what matters is HOW OFTEN the cache refreshes.
+- k2 ≈ k3 accuracy despite 58% different output: the `flexible-extract` metric
+  can find the correct answer in both k=2's mildly garbled output and k=3's
+  heavily repetitive output. The metric doesn't capture quality degradation.
+
+### Phase 10B/C: Wrapper verification and cache staleness (Mar 8)
+
+Ran `verify_wrapper.py` with instrumented wrappers that measure L2 distance between
+cached and freshly computed hidden states on every reuse call.
+
+**Step B: Subset overlap discovery**
+
+```
+first:  [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+middle: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+last:   [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+
+first ∩ middle: [8, 9, 10, 11, 12]  — 5 shared layers (42%)
+middle ∩ last:  [16, 17, 18, 19]    — 4 shared layers (33%)
+```
+
+With 12/28 layers per subset, there isn't room for 3 non-overlapping groups.
+This reduces (but doesn't fully explain) the lack of subset differentiation.
+
+**Step C: Only the first patched layer has meaningful staleness**
+
+| Layer position in subset | Mean Relative L2 | Interpretation |
+|---|---|---|
+| First layer (1, 8, or 16) | ~0.68 | 68% different from fresh — genuinely stale |
+| All other 11 layers | ~0.0004 | 0.04% different — essentially identical to fresh |
+
+Full per-layer data (k=2, first subset):
+```
+Layer  Count  Mean RelDist      Min      Max
+    1     29      0.679620 0.390306 0.941321
+    2     29      0.000362 0.000307 0.000489
+    3     29      0.000368 0.000294 0.000470
+   ...  (layers 4-12 all ~0.0004)
+```
+
+k=2 middle subset showed identical pattern: layer 8 at ~0.67, layers 9-19 at ~0.0004.
+k=3 first subset: layer 1 at ~0.68, layers 2-12 at ~0.0004. 876 reuse calls (vs 348
+for k=2) — confirming k controls reuse frequency correctly.
+
+**Root cause**: The full-block cache stores 32-token outputs. On reuse, we slice the
+correct 8-token window. For layers 2-12, the INPUT to the layer is the same in both
+paths (previous layer's cached output), so `original_forward(cached_input)` produces
+nearly identical output to the cached slice. Only the first patched layer has different
+input — its predecessor is UNPATCHED and runs fresh (seeing current tokens including
+newly unmasked ones), while the cache was built before any denoising in this round.
+
+**This explains all observations:**
+1. **Subsets don't matter**: Only 1/12 layers contributes meaningful staleness per subset.
+2. **k2 ≈ k3 accuracy**: Quality degradation comes from 1 stale layer. More frequent
+   reuse makes it staler, but `flexible-extract` still finds the answer.
+3. **95-98% identical output across subsets**: k=2 first and k=2 middle produced
+   character-identical text for the verification sample.
+4. **k=3 repetition**: More reuse calls on that single stale layer accumulate error,
+   causing repetition loops (241 tokens vs 112 for k=2 on the same prompt).
+
 ### GPU contention in sbatch runs
 
 k2_first and k2_last were scheduled on the same node (004-25) and both showed ~18
